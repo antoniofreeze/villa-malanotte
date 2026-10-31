@@ -9,7 +9,6 @@
   const HASH = location.hash.slice(1);
   const TEST = /(^|&)test\b/.test(HASH);
   const TOPIC = D.topic + (TEST ? '-test' : '');
-  const NTFY = 'https://ntfy.sh/';
   const IDS = Object.keys(D.pub);
 
   // ---------------------------------------------------------------- utilità
@@ -39,20 +38,30 @@
   }
 
   // ------------------------------------------------------------------- rete
+  // Broker MQTT pubblico via WebSocket (ntfy.sh ci ha bloccati la notte di Halloween).
+  // Lo stato (s) è "retained": chi si collega o ricarica riceve subito l'ultimo.
+  const BROKER = 'wss://broker.emqx.io:8084/mqtt';
+  const subs = {}, statusFns = [];
+  let cli = null;
+  const rid = () => Math.random().toString(36).slice(2, 12);
+  function net() {
+    if (cli) return cli;
+    cli = mqtt.connect(BROKER, { clientId: 'ufv' + rid(), clean: true, reconnectPeriod: 2000, connectTimeout: 10000, keepalive: 30 });
+    cli.on('connect', () => { Object.keys(subs).forEach((t) => cli.subscribe(t, { qos: 1 })); statusFns.forEach((f) => f(true)); });
+    cli.on('close', () => statusFns.forEach((f) => f(false)));
+    cli.on('message', (t, buf) => {
+      let o; try { o = JSON.parse(buf.toString()); } catch { return; }
+      (subs[t] || []).forEach((f) => { try { f(o, { id: o._id, time: o._t }); } catch (e) { console.error(e); } });
+    });
+    return cli;
+  }
   const send = (sub, obj) =>
-    fetch(NTFY + TOPIC + '-' + sub, { method: 'POST', body: JSON.stringify(obj) }).catch(() => {});
+    net().publish(TOPIC + '/' + sub, JSON.stringify({ ...obj, _id: rid(), _t: Date.now() / 1000 }), { qos: 1, retain: sub === 's' });
   function listen(sub, since, onMsg, onStatus) {
-    const es = new EventSource(`${NTFY}${TOPIC}-${sub}/sse?since=${since}`);
-    es.onopen = () => onStatus && onStatus(true);
-    es.onerror = () => onStatus && onStatus(false);
-    es.onmessage = (e) => {
-      try {
-        const m = JSON.parse(e.data);
-        if (m.event && m.event !== 'message') return;
-        onMsg(JSON.parse(m.message), m);
-      } catch {}
-    };
-    return es;
+    const t = TOPIC + '/' + sub, c = net();
+    (subs[t] ||= []).push(onMsg);
+    if (onStatus) statusFns.push(onStatus);
+    if (c.connected) c.subscribe(t, { qos: 1 });
   }
 
   // ------------------------------------------------------------- effetti audio
@@ -282,7 +291,7 @@
 
     // ---------- gioco
     const TABS = [['atto', '🎬', 'Atto'], ['segreti', '🤫', 'Segreti'], ['indizi', '🔎', 'Indizi'], ['chi', '🎭', 'Persone']];
-    const feed = () => events.filter((e) => S && e.g === S.g).sort((a, b) => b.time - a.time);
+    const feed = () => (S && S.sh ? S.sh.slice() : events.filter((e) => S && e.g === S.g)).sort((a, b) => b.time - a.time);
     const turnKey = () => `${S.ph}-${S.ti}`;
     let mini = null; // giro "ridotto" dall'utente (chiave del turno)
     let sheetId = null;
@@ -490,7 +499,8 @@
       const p = PH[G.ph];
       const R = p && p.round, live = R && G.turn < R.order.length;
       send('s', { g: G.g, ph: G.ph, act: p ? p.act : null, n: p ? p.title : '', kicker: p ? p.kicker : '', board: p && p.board ? p.board : null,
-        turn: live && G.turn >= 0 ? R.order[G.turn] : null, rq: live ? R.q : null, ord: live ? R.order : null, ti: live ? G.turn : null, res: G.res ? { score: G.res.score } : null, ts: Date.now() });
+        turn: live && G.turn >= 0 ? R.order[G.turn] : null, rq: live ? R.q : null, ord: live ? R.order : null, ti: live ? G.turn : null,
+        sh: G.shown.map((x) => ({ k: x.k, text: x.text, time: x.time })), res: G.res ? { score: G.res.score } : null, ts: Date.now() });
     };
     listen('e', 'all', (ev, m) => {
       const k = ev.k; if (!D.pub[k]) return;
@@ -499,11 +509,11 @@
       if (ev.g !== G.g) { save(); refreshPlayers(); return; }
       if (ev.t === 'reveal') {
         const dup = G.shown.find((s) => s.mid === m.id);
-        if (!dup) { G.shown.push({ k, id: ev.id, text: ev.text, src: ev.src, mid: m.id, time: m.time }); if (m.time > T0 - 3) pop(ev); }
+        if (!dup) { G.shown.push({ k, id: ev.id, text: ev.text, src: ev.src, mid: m.id, time: m.time }); pop(ev); publish(); }
       }
       if (ev.t === 'mission') { (G.missions[k] ||= {})[ev.id] = ev.done; }
       if (ev.t === 'vote') G.votes[k] = ev.v;
-      if (ev.t === 'done' && ev.ph === G.ph && ev.ti === G.turn && inRound() && RQ().order[G.turn] === k && m.time > T0 - 3) nextTurn();
+      if (ev.t === 'done' && ev.ph === G.ph && ev.ti === G.turn && inRound() && RQ().order[G.turn] === k) nextTurn();
       save(); refreshSide(); refreshPlayers();
     });
 
