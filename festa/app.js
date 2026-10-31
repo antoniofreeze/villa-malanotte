@@ -194,13 +194,15 @@
       const myTurn = st.turn === me.id && (!S || S.turn !== me.id);
       S = st;
       if (st.g && L.g !== st.g) { L.g = st.g; L.shown = {}; L.done = {}; L.vote = null; save(); }
+      if (changed) { vstep = L.vote ? -1 : 0; sheetId = null; }
       if ((changed && st.ph >= 0) || myTurn) { tab = 'atto'; try { navigator.vibrate && navigator.vibrate(myTurn ? [300, 100, 300, 100, 300] : [120, 60, 120]); } catch {} }
+      if (myTurn) { mini = null; try { if (AC) chime(); } catch {} }
       if (!invitePlaying) render();
     }, (ok) => { online = ok; const d = $('.dot'); if (d) d.className = 'dot ' + (ok ? 'on' : 'off'); });
     listen('e', 'all', (ev, m) => {
       if (ev.t !== 'reveal' || events.find((x) => x.mid === m.id)) return;
       events.push({ ...ev, mid: m.id, time: m.time });
-      if (tab === 'indizi' && !invitePlaying) render();
+      if (!invitePlaying && L.ready && S && S.ph >= 0 && !$('.sheet')) render();
     });
 
     function render() {
@@ -279,95 +281,152 @@
     }
 
     // ---------- gioco
+    const TABS = [['atto', '🎬', 'Atto'], ['segreti', '🤫', 'Segreti'], ['indizi', '🔎', 'Indizi'], ['chi', '🎭', 'Persone']];
+    const feed = () => events.filter((e) => S && e.g === S.g).sort((a, b) => b.time - a.time);
+    const turnKey = () => `${S.ph}-${S.ti}`;
+    let mini = null; // giro "ridotto" dall'utente (chiave del turno)
+    let sheetId = null;
+    let seenMark = L.seen || 0, lastTab = null;
     function game() {
-      const act = S.act;
-      app.innerHTML = `${header('<button class="eye" id="eye">🙈</button>')}
-        <div class="actbar"><span>${esc(S.kicker || '')}</span><b>${esc(S.n || '')}</b></div>
-        <main class="ph-main" id="main">${tabHtml(act)}</main>
-        <nav class="tabs">${[['atto', '🎬', 'Atto'], ['segreti', '🤫', 'Segreti'], ['indizi', '🔎', 'Indizi'], ['chi', '🎭', 'Personaggi']]
-          .map(([k, i, l]) => `<button data-t="${k}" class="${tab === k ? 'on' : ''}"><i>${i}</i>${l}</button>`).join('')}</nav>
+      if (tab === 'indizi') { L.seen = feed().length; save(); }
+      const unseen = Math.max(0, feed().length - (L.seen || 0));
+      // ridisegno senza perdere la posizione e le sezioni aperte
+      const same = lastTab === tab, y = window.scrollY, open = same ? $$('details.fold').map((d) => d.open) : [];
+      lastTab = tab;
+      app.innerHTML = `${header('<button class="eye" id="eye" aria-label="Nascondi lo schermo">🙈</button>')}
+        ${nowBar()}
+        <main class="ph-main" id="main">${tabHtml(S.act)}</main>
+        <nav class="tabs">${TABS.map(([k, i, l]) => `<button data-t="${k}" class="${tab === k ? 'on' : ''}"><i>${i}${k === 'indizi' && unseen ? `<em class="badge">${unseen}</em>` : ''}</i><span>${l}</span></button>`).join('')}</nav>
+        ${takeover()}
+        ${sheetId ? sheet(sheetId) : ''}
         <div class="cover ${hidden ? 'show' : ''}" id="cover"><div>🙈<p>Schermo nascosto<br><small>tocca per mostrare</small></p></div></div>`;
-      $$('.tabs button').forEach((b) => (b.onclick = () => { tab = b.dataset.t; game(); window.scrollTo(0, 0); }));
+      $$('details.fold').forEach((d, i) => { if (open[i]) d.open = true; });
+      if (same) window.scrollTo(0, y);
+      $$('.tabs button').forEach((b) => (b.onclick = () => { if (b.dataset.t === 'indizi') seenMark = L.seen || 0; tab = b.dataset.t; sheetId = null; game(); window.scrollTo(0, 0); }));
       $('#eye').onclick = () => { hidden = true; $('#cover').classList.add('show'); };
       $('#cover').onclick = () => { hidden = false; $('#cover').classList.remove('show'); };
       bind();
     }
-    const list = (cls, title, items) => (items && items.length ? `<section class="box ${cls}"><h4>${title}</h4><ul>${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul></section>` : '');
+    // barra "cosa succede adesso", sempre in alto
+    function nowBar() {
+      let chip = '';
+      const live = S.rq && S.ord;
+      if (live && S.turn === me.id) chip = `<button class="chip gold" id="reopen">🎤 Tocca a te</button>`;
+      else if (live && S.turn) {
+        const mine = S.ord.indexOf(me.id), gap = mine - S.ti;
+        chip = `<span class="chip"><img src="${imgOf(S.turn)}" alt="">Parla ${esc(nameOf(S.turn))}</span><span class="chip soft">${gap > 0 ? (gap === 1 ? 'Dopo tocca a te' : `Tu tra ${gap}`) : '✓ Hai parlato'}</span>`;
+      } else if (live) chip = `<span class="chip">🎤 Giro di parola in arrivo</span>`;
+      else if (/^a[1-9]/.test(S.act)) chip = `<span class="chip green">🗣️ Discussione libera</span>`;
+      else if (S.act === 'vote') chip = `<span class="chip gold">🗳️ Vota adesso</span>`;
+      else if (S.act === 'recap') chip = `<span class="chip">👀 Riepilogo sullo schermo</span>`;
+      return `<div class="nowbar"><div class="nb-t"><span>${esc(S.kicker || '')}</span><b>${esc(S.n || '')}</b></div>${chip ? `<div class="nb-c">${chip}</div>` : ''}</div>`;
+    }
+    // il tuo turno: schermo intero con cosa dire
+    function takeover() {
+      if (!S.rq || S.turn !== me.id || mini === turnKey()) return '';
+      const A = me.acts[S.act] || {};
+      return `<div class="take" id="take"><div class="take-in">
+        <span class="take-k">🎤 Tocca a te</span>
+        <h2>${esc(S.rq)}</h2>
+        ${A.say && A.say.length ? `<ul class="say-big">${A.say.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+        ${A.reveal && A.reveal.length ? `<div class="take-rev"><b>⚠️ Devi confessare</b>${A.reveal.map((x) => `<p>${esc(x)}</p>`).join('')}</div>` : ''}
+        <button class="btn big" id="donebtn">Ho finito ✓</button>
+        <button class="link" id="mini">Riduci (torno all'atto)</button>
+      </div></div>`;
+    }
+    const list = (cls, title, items, ordered) => (items && items.length ? `<section class="card ${cls}"><h4>${title}</h4><${ordered ? 'ol' : 'ul'}>${items.map((i) => `<li>${esc(i)}</li>`).join('')}</${ordered ? 'ol' : 'ul'}></section>` : '');
+    const fold = (title, inner, open) => `<details class="fold" ${open ? 'open' : ''}><summary>${title}</summary><div class="fold-in">${inner}</div></details>`;
+    function roleCard() {
+      return `<section class="card role ${KILLER ? 'killer' : ''}"><h4>${KILLER ? '🔪 Hai ucciso tu' : '🎭 Il tuo ruolo'}</h4><p>${esc(me.roleLine)}</p></section>`;
+    }
     function tabHtml(act) {
       if (tab === 'segreti') return secretsHtml();
       if (tab === 'indizi') return cluesHtml();
-      if (tab === 'chi') return IDS.map((id) => profile(id)).join('') +
-        Object.values(D.npc).map((n) => `<div class="prof"><img src="${n.img}" alt=""><div><h3>${esc(n.name)}</h3><p>${esc(n.blurb)}</p></div></div>`).join('');
-      // tab atto
+      if (tab === 'chi') return peopleHtml();
       if (act === 'a0') {
         const A = me.acts.a0;
-        return `${turnBox()}<section class="box role ${KILLER ? 'killer' : ''}"><h4>${KILLER ? '🔪 Il tuo ruolo' : '🎭 Il tuo ruolo'}</h4><p>${esc(me.roleLine)}</p></section>
+        return `${roleCard()}
           ${list('say', '🎤 Quando ti danno la parola', A.say)}
-          ${list('', '📜 Come giocare', me.play)}
-          <button class="btn" data-go="segreti">Leggi i tuoi segreti 🤫</button>`;
+          ${fold('📜 Come si gioca', `<ul>${me.play.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`)}
+          <button class="btn wide" data-go="segreti">Leggi i tuoi segreti 🤫</button>`;
       }
       if (act === 'vote') return voteHtml();
       if (act === 'recap') return `<div class="wait"><h2>Guardate lo schermo 👀</h2><p>Il narratore rimette in fila i fatti. Poi si vota.</p></div>${S.board ? list('board', '🕰️ Il riepilogo', S.board) : ''}`;
       if (act === 'reveal' || act === 'end') return endHtml();
       const A = me.acts[act];
       if (!A) return '';
-      return `${turnBox()}${A.mood ? `<section class="box mood"><p>${esc(A.mood)}</p></section>` : ''}
-        ${list('say', '🎤 Quando ti danno la parola', A.say)}
-        ${list('todo', '✅ Cosa fare', A.todo)}
+      const clues = A.clues || [];
+      return `${list('say', '🎤 Quando ti danno la parola', A.say)}
         ${list('reveal', '⚠️ Devi confessare in questo atto', A.reveal)}
-        ${list('hide', '🤐 Nascondi (puoi mentire)', A.hide)}
-        <h4 class="sec">Le tue prove</h4>
-        ${(A.clues || []).map(clueCard).join('')}
-        ${A.mission ? `<section class="box mission ${L.done[A.mission.id] ? 'done' : ''}"><h4>🎯 Missione segreta (+1 punto)</h4><p>${esc(A.mission.text)}</p>
-          <button class="btn small ${L.done[A.mission.id] ? 'ok' : 'ghost'}" data-m="${A.mission.id}">${L.done[A.mission.id] ? 'Fatto ✓' : 'Segna come fatta'}</button></section>` : ''}`;
-    }
-    function turnBox() {
-      if (!S || !S.rq) return '';
-      if (!S.turn) return `<section class="box turn"><h4>🎤 Giro di parola</h4><p>${esc(S.rq)}</p></section>`;
-      if (S.turn === me.id) return `<section class="box turn me"><h4>🎤 Tocca a te!</h4><p>${esc(S.rq)}</p></section>`;
-      return `<section class="box turn other"><img src="${imgOf(S.turn)}" alt=""><div><h4>🎤 Parla ${esc(nameOf(S.turn))}</h4><p>${esc(S.rq)}</p></div></section>`;
+        ${list('todo', '✅ Da fare', A.todo)}
+        ${list('hide', '🤐 Puoi nasconderlo (anche mentendo)', A.hide)}
+        ${clues.length ? `<h4 class="sec">🔎 Le tue prove <small>${clues.filter((c) => L.shown[c.id]).length}/${clues.length} mostrate</small></h4>${clues.map(clueCard).join('')}` : ''}
+        ${A.mission ? `<button class="card mission ${L.done[A.mission.id] ? 'done' : ''}" data-m="${A.mission.id}">
+          <span class="tick">${L.done[A.mission.id] ? '✓' : ''}</span><span><b>🎯 Missione segreta · +1 punto</b>${esc(A.mission.text)}<small>${L.done[A.mission.id] ? 'Fatta! Tocca per annullare' : 'Tocca quando l\'hai fatta'}</small></span></button>` : ''}`;
     }
     function clueCard(c) {
       const shown = L.shown[c.id];
       return `<div class="clue ${shown ? 'shown' : ''}"><p>${esc(c.text)}</p>
         ${c.src ? `<button class="btn small ghost" data-play="${c.src}">▶ Ascolta tu (piano)</button>` : ''}
-        <button class="btn small ${shown ? 'ok' : ''}" data-c="${c.id}">${shown ? '✓ Mostrato a tutti' : '📢 Mostra a tutti'}</button></div>`;
+        <button class="btn wide ${shown ? 'ok' : ''}" data-c="${c.id}">${shown ? '✓ Già sullo schermo · rimanda' : '📢 Mostra a tutti'}</button></div>`;
     }
     function secretsHtml() {
-      return `<section class="box role ${KILLER ? 'killer' : ''}"><h4>${KILLER ? '🔪 HAI UCCISO TU' : '🎭 Il tuo ruolo'}</h4><p>${esc(me.roleLine)}</p></section>
-        ${me.alibi ? `<section class="box hide"><h4>🧥 Il tuo alibi</h4><p>${esc(me.alibi)}</p></section>` : ''}
-        ${me.secrets.map((s) => `<section class="box secret"><h4>${esc(s.t)}</h4><p>${esc(s.d)}</p></section>`).join('')}
-        ${list('', '📜 Come giocare', me.play)}`;
+      return `${roleCard()}
+        ${me.alibi ? `<section class="card hide"><h4>🧥 Il tuo alibi</h4><p>${esc(me.alibi)}</p></section>` : ''}
+        <h4 class="sec">🤫 I tuoi segreti <small>tocca per aprire</small></h4>
+        ${me.secrets.map((s, i) => fold(`<span class="n">${i + 1}</span>${esc(s.t)}`, `<p>${esc(s.d)}</p>`)).join('')}
+        ${fold('📜 Come si gioca', `<ul>${me.play.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`)}`;
     }
     function cluesHtml() {
-      const mine = events.filter((e) => S && e.g === S.g).sort((a, b) => b.time - a.time);
+      const all = feed(), fresh = all.length - seenMark;
       return `${S.board && S.board.length ? list('board', '🔎 Sulla scena', S.board) : ''}
-        <h4 class="sec">Indizi mostrati a tutti</h4>
-        ${mine.length ? mine.map((e) => `<div class="feed"><img src="${imgOf(e.k)}" alt=""><div><b>${esc(nameOf(e.k))}</b><p>${esc(e.text)}</p></div></div>`).join('') : '<p class="muted">Ancora nessuno. Usa "📢 Mostra a tutti" sulle tue prove.</p>'}
-        ${list('', '🕰️ La serata', D.facts)}`;
+        <h4 class="sec">📢 Prove mostrate a tutti <small>${all.length}</small></h4>
+        ${all.length ? all.map((e, i) => `<div class="bubble ${e.k === me.id ? 'mine' : ''}"><img src="${imgOf(e.k)}" alt=""><div><b>${esc(nameOf(e.k))}${i < fresh ? ' <em>nuova</em>' : ''}</b><p>${esc(e.text)}</p></div></div>`).join('') : '<p class="muted">Ancora nessuna. Quando qualcuno preme "📢 Mostra a tutti", la prova compare qui.</p>'}
+        ${fold('🕰️ La serata, ora per ora', `<ul>${D.facts.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`)}`;
     }
+    function peopleHtml() {
+      const all = [...IDS.map((id) => [id, D.pub[id]]), ...Object.entries(D.npc)];
+      return `<p class="muted center-t">Tocca un ritratto per leggere chi è.</p>
+        <div class="people">${all.map(([id, p]) => `<button class="person ${id === me.id ? 'me' : ''}" data-who="${id}"><img src="${p.img}" alt=""><b>${esc(p.name)}</b><small>${esc(p.title || (D.pub[id] ? '' : 'Personaggio'))}</small></button>`).join('')}</div>`;
+    }
+    function sheet(id) {
+      const p = D.pub[id] || D.npc[id];
+      return `<div class="sheet" id="sheet"><div class="sheet-in"><button class="sheet-x" id="sheetx" aria-label="Chiudi">✕</button>
+        <img src="${p.img}" alt=""><h3>${esc(p.name)}</h3>${p.title ? `<em>${esc(p.title)}</em>` : ''}<p>${esc(p.blurb)}</p>${p.costume ? `<p class="cost">🎭 ${esc(p.costume)}</p>` : ''}</div></div>`;
+    }
+    // voto a passi: una domanda per schermata, come nei quiz
+    let vstep = 0, vdraft = null;
     function voteHtml() {
-      const v = L.vote || {};
-      const opt = (q, ids) => `<div class="q" data-q="${q.id}"><h4>${esc(q.q)}</h4><div class="chips">${ids
-        .map((id) => `<button data-v="${id}" class="${v[q.id] === id ? 'on' : ''}"><img src="${imgOf(id)}" alt="">${esc(nameOf(id))}</button>`).join('')}</div></div>`;
-      return `<section class="box vote"><h4>🗳️ L'accusa</h4><p>Vota in segreto. Puoi cambiare idea finché non si rivela la verità.</p></section>
-        ${D.vote.questions.map((q) => opt(q, q.players ? IDS.filter((id) => id !== me.id) : D.vote.suspects)).join('')}
-        <button class="btn big" id="sendvote">${L.vote ? 'Aggiorna il voto' : 'Invia il voto'} 🗳️</button>
-        ${L.vote ? '<p class="okmsg">✓ Voto inviato</p>' : ''}`;
+      const Q = D.vote.questions, n = Q.length;
+      if (!vdraft) vdraft = { ...(L.vote || {}) };
+      if (L.vote && vstep < 0) return `<div class="wait"><div class="seal small">🗳️</div><h2>Voto inviato ✓</h2><p>Puoi cambiarlo finché non si rivela la verità.</p></div>
+        ${summary()}<button class="btn wide ghost" id="vedit">Modifica il voto</button>`;
+      if (vstep >= n) return `<div class="steps">${dots(n, n)}</div><h3 class="vq">Controlla e invia</h3>${summary(true)}
+        <button class="btn big wide" id="sendvote">Invia il voto 🗳️</button><button class="link" id="vback">◀ Indietro</button>`;
+      const q = Q[vstep], ids = q.players ? IDS.filter((id) => id !== me.id) : D.vote.suspects;
+      return `<div class="steps">${dots(n, vstep)}<span>${vstep + 1} di ${n}</span></div>
+        <h3 class="vq">${esc(q.q)}</h3>${q.pts ? `<p class="muted center-t">${q.pts === 3 ? '+3 punti se indovini' : '+1 punto se indovini'}</p>` : ''}
+        <div class="pick">${ids.map((id) => `<button data-v="${id}" class="${vdraft[q.id] === id ? 'on' : ''}"><img src="${imgOf(id)}" alt=""><b>${esc(nameOf(id))}</b></button>`).join('')}</div>
+        ${vstep > 0 ? '<button class="link" id="vback">◀ Domanda precedente</button>' : ''}`;
+    }
+    const dots = (n, cur) => Array.from({ length: n }, (_, i) => `<i class="${i < cur ? 'past' : i === cur ? 'now' : ''}"></i>`).join('');
+    function summary(edit) {
+      const v = edit ? vdraft : L.vote || {};
+      return `<div class="sum">${D.vote.questions.map((q, i) => `<button class="sum-r" ${edit ? `data-step="${i}"` : 'disabled'}><span>${esc(q.q)}</span>${v[q.id] ? `<b><img src="${imgOf(v[q.id])}" alt="">${esc(nameOf(v[q.id]))}</b>` : '<b class="muted">—</b>'}</button>`).join('')}</div>`;
     }
     function endHtml() {
       const r = S.res;
       if (!r) return `<div class="wait"><div class="candle"><i></i></div><h2>Guardate lo schermo grande 👀</h2><p>La verità sta per essere svelata.</p></div>`;
       const rank = Object.entries(r.score).sort((a, b) => b[1] - a[1]);
       const pos = rank.findIndex(([id]) => id === me.id) + 1;
-      return `<div class="wait"><h2>${pos === 1 ? '🏆 Hai vinto!' : `Sei ${pos}° in classifica`}</h2><p>Hai fatto <b>${r.score[me.id] || 0}</b> punti.</p></div>
-        <section class="box"><h4>Classifica</h4><ol class="rank">${rank.map(([id, s]) => `<li class="${id === me.id ? 'me' : ''}"><img src="${imgOf(id)}" alt="">${esc(nameOf(id))}<b>${s}</b></li>`).join('')}</ol></section>`;
+      return `<div class="wait"><div class="seal small">${pos === 1 ? '🏆' : '🥂'}</div><h2>${pos === 1 ? 'Hai vinto!' : `Sei ${pos}° in classifica`}</h2><p>Hai fatto <b>${r.score[me.id] || 0}</b> punti.</p></div>
+        <section class="card"><h4>Classifica</h4><ol class="rank">${rank.map(([id, s]) => `<li class="${id === me.id ? 'me' : ''}"><img src="${imgOf(id)}" alt="">${esc(nameOf(id))}<b>${s}</b></li>`).join('')}</ol></section>`;
     }
     function bind() {
-      $$('[data-go]').forEach((b) => (b.onclick = () => { tab = b.dataset.go; game(); }));
+      $$('[data-go]').forEach((b) => (b.onclick = () => { tab = b.dataset.go; game(); window.scrollTo(0, 0); }));
       $$('[data-c]').forEach((b) => (b.onclick = () => {
         const A = me.acts[S.act]; const c = A.clues.find((x) => x.id === b.dataset.c);
-        if (L.shown[c.id] && !confirm('Lo hai già mostrato. Rimandarlo sullo schermo?')) return;
+        if (L.shown[c.id] && !confirm('L\'hai già mostrata. Rimandarla sullo schermo?')) return;
         if (!L.shown[c.id] && !confirm('Mostrare questa prova a tutti sullo schermo grande?')) return;
         send('e', { t: 'reveal', g: S.g, k: me.id, id: c.id, text: c.text, src: c.src || null });
         L.shown[c.id] = 1; save(); game();
@@ -377,17 +436,33 @@
         const id = b.dataset.m; L.done[id] = !L.done[id]; save();
         send('e', { t: 'mission', g: S.g, k: me.id, id, done: !!L.done[id] }); game();
       }));
-      $$('.q').forEach((q) => $$('button', q).forEach((b) => (b.onclick = () => {
-        $$('button', q).forEach((x) => x.classList.remove('on')); b.classList.add('on');
-      })));
+      $$('[data-who]').forEach((b) => (b.onclick = () => { sheetId = b.dataset.who; game(); }));
+      const sx = $('#sheet'); if (sx) sx.onclick = (e) => { if (e.target === sx || e.target.id === 'sheetx') { sheetId = null; game(); } };
+      const db = $('#donebtn'); if (db) db.onclick = () => { send('e', { t: 'done', g: S.g, k: me.id, ph: S.ph, ti: S.ti }); mini = turnKey(); game(); };
+      const mb = $('#mini'); if (mb) mb.onclick = () => { mini = turnKey(); game(); };
+      const ro = $('#reopen'); if (ro) ro.onclick = () => { mini = null; game(); };
+      // voto
+      $$('.pick button').forEach((b) => (b.onclick = () => {
+        const q = D.vote.questions[vstep]; vdraft[q.id] = b.dataset.v;
+        $$('.pick button').forEach((x) => x.classList.toggle('on', x === b));
+        setTimeout(() => { vstep++; game(); window.scrollTo(0, 0); }, 260);
+      }));
+      $$('[data-step]').forEach((b) => (b.onclick = () => { vstep = +b.dataset.step; game(); }));
+      const vb = $('#vback'); if (vb) vb.onclick = () => { vstep = Math.max(0, vstep - 1); game(); };
+      const ve = $('#vedit'); if (ve) ve.onclick = () => { vstep = 0; vdraft = { ...L.vote }; game(); };
       const sv = $('#sendvote');
       if (sv) sv.onclick = () => {
-        const v = {};
-        $$('.q').forEach((q) => { const on = $('button.on', q); if (on) v[q.dataset.q] = on.dataset.v; });
-        if (!v.killer) return alert('Scegli almeno chi ha ucciso.');
-        L.vote = v; save(); send('e', { t: 'vote', g: S.g, k: me.id, v }); game();
+        if (!vdraft.killer) { vstep = 0; return game(); }
+        L.vote = { ...vdraft }; save(); send('e', { t: 'vote', g: S.g, k: me.id, v: L.vote }); vstep = -1; game();
       };
     }
+    if (L.vote) vstep = -1;
+
+    // lo schermo del telefono non si spegne durante la cena
+    let wl = null;
+    const wake = async () => { try { if (!wl && navigator.wakeLock && document.visibilityState === 'visible') { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => (wl = null)); } } catch {} };
+    document.addEventListener('click', wake);
+    document.addEventListener('visibilitychange', wake);
 
     render();
   }
@@ -415,7 +490,7 @@
       const p = PH[G.ph];
       const R = p && p.round, live = R && G.turn < R.order.length;
       send('s', { g: G.g, ph: G.ph, act: p ? p.act : null, n: p ? p.title : '', kicker: p ? p.kicker : '', board: p && p.board ? p.board : null,
-        turn: live && G.turn >= 0 ? R.order[G.turn] : null, rq: live ? R.q : null, res: G.res ? { score: G.res.score } : null, ts: Date.now() });
+        turn: live && G.turn >= 0 ? R.order[G.turn] : null, rq: live ? R.q : null, ord: live ? R.order : null, ti: live ? G.turn : null, res: G.res ? { score: G.res.score } : null, ts: Date.now() });
     };
     listen('e', 'all', (ev, m) => {
       const k = ev.k; if (!D.pub[k]) return;
@@ -428,6 +503,7 @@
       }
       if (ev.t === 'mission') { (G.missions[k] ||= {})[ev.id] = ev.done; }
       if (ev.t === 'vote') G.votes[k] = ev.v;
+      if (ev.t === 'done' && ev.ph === G.ph && ev.ti === G.turn && inRound() && RQ().order[G.turn] === k && m.time > T0 - 3) nextTurn();
       save(); refreshSide(); refreshPlayers();
     });
 
